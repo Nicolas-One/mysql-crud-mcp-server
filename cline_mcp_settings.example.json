@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "mysql-crud": {
+      "command": "node",
+      "args": ["完整路径/mysql-crud-server/build/index.js"],
+      "env": {
+        "MYSQL_HOST": "127.0.0.1",
+        "MYSQL_PORT": "3306",
+        "MYSQL_USER": "your_username",
+        "MYSQL_PASSWORD": "your_password",
+        "MYSQL_DATABASE": "your_database"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "mysql_select",
+        "mysql_insert",
+        "mysql_update",
+        "mysql_delete"
+      ]
+    }
+  }
+}
