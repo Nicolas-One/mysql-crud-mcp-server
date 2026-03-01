@@ -71,8 +71,8 @@ function parseIniConfig(filePath: string): Record<string, Record<string, string>
 // 支持两种格式：KEY=VALUE 格式 或 INI 格式
 function getDatabaseConfig() {
   // 优先级 1: 尝试读取 .env 文件
-  // 支持通过 ENV_PATH 环境变量指定 .env 文件路径
-  const envPath = process.env.ENV_PATH || path.join(__dirname, '..', '.env');
+  // 优先级顺序：当前工作目录 > ENV_PATH环境变量 > 源代码相对路径
+  const envPath = process.env.ENV_PATH || path.join(process.cwd(), '.env');
 
   // 首先尝试解析 INI 格式
   const iniConfig = parseIniConfig(envPath);
@@ -84,7 +84,7 @@ function getDatabaseConfig() {
   const configNameMappings = {
     host: ['MYSQL_HOST', 'DB_HOST', 'DATABASE_HOST', 'HOST', 'HOSTNAME'],
     port: ['MYSQL_PORT', 'DB_PORT', 'DATABASE_PORT', 'PORT', 'HOSTPORT'],
-    user: ['MYSQL_USER', 'DB_USER', 'DATABASE_USER', 'USER', 'MYSQL_USERNAME', 'DB_USERNAME', 'USERNAME'],
+    user: ['MYSQL_USER', 'DB_USER', 'MYSQL_USERNAME', 'DB_USERNAME', 'DATABASE_USER', 'USERNAME', 'USER'],
     password: ['MYSQL_PASSWORD', 'DB_PASSWORD', 'DATABASE_PASSWORD', 'PASSWORD'],
     database: ['MYSQL_DATABASE', 'DB_NAME', 'DATABASE_NAME', 'DATABASE', 'DB_DATABASE'],
     charset: ['CHARSET', 'CHARACTER_SET']
