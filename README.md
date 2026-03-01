@@ -2,38 +2,31 @@
 
 这是一个用于 MySQL 数据库操作的 MCP (Model Context Protocol) 服务器插件，提供完整的 CRUD 操作工具。
 
-## 🚀 一键安装（推荐）
+## 🚀 快速开始
 
-### 方式一：自动安装脚本
+### 使用 npm 安装（推荐）
+
+```bash
+npm install mysql-crud-server
+```
+
+### 本地开发安装
 
 ```bash
 # 1. 克隆或下载项目文件到本地
 # 2. 进入项目目录
 cd mysql-crud-server
 
-# 3. 运行安装脚本
-node install.cjs
-```
-
-安装脚本会自动：
-- 安装项目依赖
-- 构建项目
-- 引导您配置数据库连接信息
-- 自动生成 .env 文件或更新 MCP 配置文件
-
-### 方式二：手动安装
-
-```bash
-# 1. 安装依赖
+# 3. 安装依赖
 npm install
 
-# 2. 构建项目
+# 4. 构建项目
 npm run build
 
-# 3. 复制配置文件模板
+# 5. 复制配置文件模板
 cp .env.example .env
 
-# 4. 编辑 .env 文件，填入您的数据库信息
+# 6. 编辑 .env 文件，填入您的数据库信息
 ```
 
 ## ⚙️ 配置说明
@@ -42,7 +35,7 @@ cp .env.example .env
 
 #### 方式一：项目级 .env 文件（推荐）
 
-最简单的配置方式，无需修改全局设置。MCP 会自动在项目根目录查找 `.env` 文件。
+最简单的配置方式，无需修改全局设置。MCP 会自动在项目根目录查找 `.env` 文件。支持两种格式：
 
 **步骤：**
 
@@ -50,40 +43,60 @@ cp .env.example .env
 2. 填入您的 MySQL 数据库信息
 3. 在 MCP 配置中指定 `ENV_PATH` 环境变量
 
-**示例 .env 文件：**
-```
+**格式一：标准 KEY=VALUE 格式**
+
+```env
 DB_HOST=127.0.0.1
 DB_PORT=3306
 DB_USER=root
 DB_PASSWORD=your_password
 DB_NAME=your_database
+CHARSET=utf8
 ```
 
+**格式二：INI 格式（[DATABASE] section）**
+
+```ini
+[DATABASE]
+TYPE=mysql
+HOSTNAME=127.0.0.1
+HOSTPORT=3306
+USERNAME=root
+PASSWORD=your_password
+DATABASE=your_database
+CHARSET=utf8
+DEBUG=true
+```
+
+**支持的配置名称（任选其一）：**
+- 主机: `MYSQL_HOST` / `DB_HOST` / `DATABASE_HOST` / `HOST` / `HOSTNAME`
+- 端口: `MYSQL_PORT` / `DB_PORT` / `DATABASE_PORT` / `PORT` / `HOSTPORT`
+- 用户: `MYSQL_USER` / `DB_USER` / `DATABASE_USER` / `USER` / `MYSQL_USERNAME` / `DB_USERNAME` / `USERNAME`
+- 密码: `MYSQL_PASSWORD` / `DB_PASSWORD` / `DATABASE_PASSWORD` / `PASSWORD`
+- 数据库: `MYSQL_DATABASE` / `DB_NAME` / `DATABASE_NAME` / `DATABASE` / `DB_DATABASE`
+- 字符集: `CHARSET` / `CHARACTER_SET`（默认: utf8）
+
 **MCP 配置示例（Claude Code）：**
+
 ```json
 {
   "mcpServers": {
     "mysql-crud": {
       "command": "node",
-      "args": ["/path/to/mysql-crud-server/build/index.js"],
-      "env": {
-        "ENV_PATH": "/path/to/your/project/.env"
-      }
+      "args": ["./mysql-crud-server/build/index.js"]
     }
   }
 }
 ```
 
 **MCP 配置示例（Cline）：**
+
 ```json
 {
   "mcpServers": {
     "mysql-crud": {
       "command": "node",
       "args": ["/path/to/mysql-crud-server/build/index.js"],
-      "env": {
-        "ENV_PATH": "/path/to/your/project/.env"
-      },
       "disabled": false,
       "autoApprove": [
         "mysql_select",
@@ -95,8 +108,6 @@ DB_NAME=your_database
   }
 }
 ```
-
-**支持的配置名称（灵活识别）：**
 
 MCP 支持多种配置名称，您可以使用任何一种：
 
@@ -273,6 +284,57 @@ DELETE FROM users WHERE id = ?
 - 确认防火墙设置
 - 调整连接超时设置
 
+### 配置文件找不到
+- 确保 `.env` 文件在项目根目录
+- 检查 `ENV_PATH` 环境变量是否正确设置
+- 查看错误消息中的配置路径提示
+
+### 权限错误
+- 确认 MySQL 用户有足够的权限
+- 检查用户名和密码是否正确
+- 验证数据库是否存在
+
 ## 📖 更多信息
 
-如需修改代码或了解更多技术细节，请查看源码中的注释。
+- 查看 [CHANGELOG.md](./CHANGELOG.md) 了解版本历史
+- 查看源码中的注释了解技术细节
+- 访问 [npm 包页面](https://www.npmjs.com/package/mysql-crud-server)
+
+## 🤝 贡献指南
+
+欢迎提交 Issue 和 Pull Request！
+
+### 开发设置
+
+```bash
+# 安装依赖
+npm install
+
+# 构建项目
+npm run build
+
+# 监视文件变化
+npm run watch
+
+# 启动服务器
+npm start
+```
+
+### 提交更改
+
+1. Fork 本仓库
+2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 开启 Pull Request
+
+### 代码规范
+
+- 使用 TypeScript 编写代码
+- 遵循现有的代码风格
+- 添加适当的注释和文档
+- 确保代码能够成功构建
+
+## 📄 许可证
+
+本项目采用 MIT 许可证 - 详见 [LICENSE](./LICENSE) 文件

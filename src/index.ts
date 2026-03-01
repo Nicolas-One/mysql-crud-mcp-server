@@ -10,6 +10,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import {
   CallToolRequestSchema,
@@ -21,20 +22,72 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/**
+ * 解析 INI 格式的配置文件
+ */
+function parseIniConfig(filePath: string): Record<string, Record<string, string>> {
+  const config: Record<string, Record<string, string>> = {};
+
+  try {
+    if (!fs.existsSync(filePath)) {
+      return config;
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    let currentSection = '';
+
+    content.split('\n').forEach(line => {
+      line = line.trim();
+
+      // 跳过空行和注释
+      if (!line || line.startsWith(';') || line.startsWith('#')) {
+        return;
+      }
+
+      // 检查是否是 section 标题
+      const sectionMatch = line.match(/^\[([^\]]+)\]$/);
+      if (sectionMatch) {
+        currentSection = sectionMatch[1];
+        config[currentSection] = {};
+        return;
+      }
+
+      // 解析 key=value
+      const keyValueMatch = line.match(/^([^=]+)=(.*)$/);
+      if (keyValueMatch && currentSection) {
+        const key = keyValueMatch[1].trim();
+        const value = keyValueMatch[2].trim();
+        config[currentSection][key] = value;
+      }
+    });
+  } catch (error) {
+    // 忽略解析错误
+  }
+
+  return config;
+}
+
 // 数据库连接配置 - 支持项目级 .env 文件和环境变量
+// 支持两种格式：KEY=VALUE 格式 或 INI 格式
 function getDatabaseConfig() {
   // 优先级 1: 尝试读取 .env 文件
   // 支持通过 ENV_PATH 环境变量指定 .env 文件路径
   const envPath = process.env.ENV_PATH || path.join(__dirname, '..', '.env');
+
+  // 首先尝试解析 INI 格式
+  const iniConfig = parseIniConfig(envPath);
+
+  // 然后加载标准 .env 格式
   dotenv.config({ path: envPath });
 
   // 定义可能的配置名称映射（支持多种命名约定）
   const configNameMappings = {
-    host: ['MYSQL_HOST', 'DB_HOST', 'DATABASE_HOST', 'HOST'],
-    port: ['MYSQL_PORT', 'DB_PORT', 'DATABASE_PORT', 'PORT'],
-    user: ['MYSQL_USER', 'DB_USER', 'DATABASE_USER', 'USER', 'MYSQL_USERNAME', 'DB_USERNAME'],
+    host: ['MYSQL_HOST', 'DB_HOST', 'DATABASE_HOST', 'HOST', 'HOSTNAME'],
+    port: ['MYSQL_PORT', 'DB_PORT', 'DATABASE_PORT', 'PORT', 'HOSTPORT'],
+    user: ['MYSQL_USER', 'DB_USER', 'DATABASE_USER', 'USER', 'MYSQL_USERNAME', 'DB_USERNAME', 'USERNAME'],
     password: ['MYSQL_PASSWORD', 'DB_PASSWORD', 'DATABASE_PASSWORD', 'PASSWORD'],
-    database: ['MYSQL_DATABASE', 'DB_NAME', 'DATABASE_NAME', 'DATABASE', 'DB_DATABASE']
+    database: ['MYSQL_DATABASE', 'DB_NAME', 'DATABASE_NAME', 'DATABASE', 'DB_DATABASE'],
+    charset: ['CHARSET', 'CHARACTER_SET']
   };
 
   // 尝试从环境变量中获取配置值
@@ -50,12 +103,33 @@ function getDatabaseConfig() {
     return undefined;
   }
 
-  // 获取所有配置值
-  const host = getConfigValue('host');
-  const port = getConfigValue('port');
-  const user = getConfigValue('user');
-  const password = getConfigValue('password');
-  const database = getConfigValue('database');
+  // 尝试从 INI 配置中获取值
+  function getIniConfigValue(configKey: string): string | undefined {
+    // 支持 [DATABASE] 和 [MYSQL] 两种 section
+    const sections = ['DATABASE', 'MYSQL'];
+
+    for (const section of sections) {
+      if (iniConfig[section]) {
+        const possibleNames = configNameMappings[configKey as keyof typeof configNameMappings];
+        if (possibleNames) {
+          for (const name of possibleNames) {
+            if (iniConfig[section][name]) {
+              return iniConfig[section][name];
+            }
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+
+  // 获取所有配置值（优先级：环境变量 > INI 配置 > 默认值）
+  const host = getConfigValue('host') || getIniConfigValue('host');
+  const port = getConfigValue('port') || getIniConfigValue('port');
+  const user = getConfigValue('user') || getIniConfigValue('user');
+  const password = getConfigValue('password') || getIniConfigValue('password');
+  const database = getConfigValue('database') || getIniConfigValue('database');
+  const charset = getConfigValue('charset') || getIniConfigValue('charset') || 'utf8';
 
   // 检查是否有任何配置被设置
   const hasAnyConfig = host || port || user || password || database;
@@ -66,23 +140,35 @@ function getDatabaseConfig() {
       `配置方式（优先级顺序）：\n\n` +
       `1. 项目级 .env 文件（推荐）\n` +
       `   - 在项目根目录创建 .env 文件\n` +
-      `   - 支持的配置名称（任选其一）：\n` +
-      `     • 主机: MYSQL_HOST / DB_HOST / DATABASE_HOST / HOST\n` +
-      `     • 端口: MYSQL_PORT / DB_PORT / DATABASE_PORT / PORT\n` +
-      `     • 用户: MYSQL_USER / DB_USER / DATABASE_USER / USER / MYSQL_USERNAME / DB_USERNAME\n` +
+      `   - 支持两种格式：\n\n` +
+      `   格式一：标准 KEY=VALUE 格式\n` +
+      `   DB_HOST=127.0.0.1\n` +
+      `   DB_PORT=3306\n` +
+      `   DB_USER=root\n` +
+      `   DB_PASSWORD=your_password\n` +
+      `   DB_NAME=your_database\n` +
+      `   CHARSET=utf8\n\n` +
+      `   格式二：INI 格式（[DATABASE] 或 [MYSQL] section）\n` +
+      `   [DATABASE]\n` +
+      `   TYPE=mysql\n` +
+      `   HOSTNAME=127.0.0.1\n` +
+      `   HOSTPORT=3306\n` +
+      `   USERNAME=root\n` +
+      `   PASSWORD=your_password\n` +
+      `   DATABASE=your_database\n` +
+      `   CHARSET=utf8\n\n` +
+      `   支持的配置名称（任选其一）：\n` +
+      `     • 主机: MYSQL_HOST / DB_HOST / DATABASE_HOST / HOST / HOSTNAME\n` +
+      `     • 端口: MYSQL_PORT / DB_PORT / DATABASE_PORT / PORT / HOSTPORT\n` +
+      `     • 用户: MYSQL_USER / DB_USER / DATABASE_USER / USER / MYSQL_USERNAME / DB_USERNAME / USERNAME\n` +
       `     • 密码: MYSQL_PASSWORD / DB_PASSWORD / DATABASE_PASSWORD / PASSWORD\n` +
-      `     • 数据库: MYSQL_DATABASE / DB_NAME / DATABASE_NAME / DATABASE / DB_DATABASE\n\n` +
+      `     • 数据库: MYSQL_DATABASE / DB_NAME / DATABASE_NAME / DATABASE / DB_DATABASE\n` +
+      `     • 字符集: CHARSET / CHARACTER_SET (默认: utf8)\n\n` +
       `2. 全局 MCP 配置文件\n` +
       `   - 复制项目中的 cline_mcp_settings.example.json 文件\n` +
       `   - 编辑其中的数据库配置信息\n` +
       `   - 将配置添加到您的 cline_mcp_settings.json 文件中\n` +
       `   - 配置位置: %APPDATA%\\Code\\User\\globalStorage\\saoudrizwan.claude-dev\\settings\\cline_mcp_settings.json\n\n` +
-      `示例 .env 文件：\n` +
-      `DB_HOST=127.0.0.1\n` +
-      `DB_PORT=3306\n` +
-      `DB_USER=root\n` +
-      `DB_PASSWORD=your_password\n` +
-      `DB_NAME=your_database\n\n` +
       `或者运行 install.cjs 脚本进行自动配置。`
     );
   }
@@ -97,25 +183,33 @@ function getDatabaseConfig() {
   };
 
   for (const [key, names] of Object.entries(requiredConfigs)) {
-    const value = getConfigValue(key);
+    const value = getConfigValue(key) || getIniConfigValue(key);
     if (!value) {
       throw new Error(
         `缺少必需的数据库配置: ${names}\n\n` +
         `请通过以下方式之一配置：\n\n` +
         `1. 在项目根目录的 .env 文件中配置（推荐）\n` +
-        `   示例：\n` +
+        `   格式一：标准 KEY=VALUE 格式\n` +
         `   DB_HOST=127.0.0.1\n` +
         `   DB_PORT=3306\n` +
         `   DB_USER=root\n` +
         `   DB_PASSWORD=your_password\n` +
         `   DB_NAME=your_database\n\n` +
+        `   格式二：INI 格式\n` +
+        `   [DATABASE]\n` +
+        `   HOSTNAME=127.0.0.1\n` +
+        `   HOSTPORT=3306\n` +
+        `   USERNAME=root\n` +
+        `   PASSWORD=your_password\n` +
+        `   DATABASE=your_database\n\n` +
         `2. 在 MCP 设置中配置环境变量\n\n` +
         `支持的配置名称：\n` +
-        `- 主机: MYSQL_HOST / DB_HOST / DATABASE_HOST / HOST\n` +
-        `- 端口: MYSQL_PORT / DB_PORT / DATABASE_PORT / PORT\n` +
-        `- 用户: MYSQL_USER / DB_USER / DATABASE_USER / USER / MYSQL_USERNAME / DB_USERNAME\n` +
+        `- 主机: MYSQL_HOST / DB_HOST / DATABASE_HOST / HOST / HOSTNAME\n` +
+        `- 端口: MYSQL_PORT / DB_PORT / DATABASE_PORT / PORT / HOSTPORT\n` +
+        `- 用户: MYSQL_USER / DB_USER / DATABASE_USER / USER / MYSQL_USERNAME / DB_USERNAME / USERNAME\n` +
         `- 密码: MYSQL_PASSWORD / DB_PASSWORD / DATABASE_PASSWORD / PASSWORD\n` +
-        `- 数据库: MYSQL_DATABASE / DB_NAME / DATABASE_NAME / DATABASE / DB_DATABASE`
+        `- 数据库: MYSQL_DATABASE / DB_NAME / DATABASE_NAME / DATABASE / DB_DATABASE\n` +
+        `- 字符集: CHARSET / CHARACTER_SET (默认: utf8)`
       );
     }
   }
@@ -126,6 +220,7 @@ function getDatabaseConfig() {
     user: user!,
     password: password!,
     database: database!,
+    charset: charset,
     connectTimeout: 60000,
     waitForConnections: true,
     connectionLimit: 10,

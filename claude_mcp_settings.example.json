@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "mysql-crud": {
+      "command": "node",
+      "args": [
+        "./mysql-crud-server/build/index.js"
+      ]
+    }
+  }
+}
