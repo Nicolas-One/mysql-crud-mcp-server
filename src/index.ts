@@ -8,6 +8,9 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import mysql from 'mysql2/promise';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -15,63 +18,118 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 
-// 数据库连接配置 - 需要通过环境变量配置
-function getDatabaseConfig() {
-  const requiredEnvVars = ['MYSQL_HOST', 'MYSQL_PORT', 'MYSQL_USER', 'MYSQL_PASSWORD', 'MYSQL_DATABASE'];
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-  // 检查是否有任何环境变量被配置
-  const hasAnyConfig = requiredEnvVars.some(envVar => process.env[envVar]);
+// 数据库连接配置 - 支持项目级 .env 文件和环境变量
+function getDatabaseConfig() {
+  // 优先级 1: 尝试读取 .env 文件
+  // 支持通过 ENV_PATH 环境变量指定 .env 文件路径
+  const envPath = process.env.ENV_PATH || path.join(__dirname, '..', '.env');
+  dotenv.config({ path: envPath });
+
+  // 定义可能的配置名称映射（支持多种命名约定）
+  const configNameMappings = {
+    host: ['MYSQL_HOST', 'DB_HOST', 'DATABASE_HOST', 'HOST'],
+    port: ['MYSQL_PORT', 'DB_PORT', 'DATABASE_PORT', 'PORT'],
+    user: ['MYSQL_USER', 'DB_USER', 'DATABASE_USER', 'USER', 'MYSQL_USERNAME', 'DB_USERNAME'],
+    password: ['MYSQL_PASSWORD', 'DB_PASSWORD', 'DATABASE_PASSWORD', 'PASSWORD'],
+    database: ['MYSQL_DATABASE', 'DB_NAME', 'DATABASE_NAME', 'DATABASE', 'DB_DATABASE']
+  };
+
+  // 尝试从环境变量中获取配置值
+  function getConfigValue(configKey: string): string | undefined {
+    const possibleNames = configNameMappings[configKey as keyof typeof configNameMappings];
+    if (!possibleNames) return undefined;
+
+    for (const name of possibleNames) {
+      if (process.env[name]) {
+        return process.env[name];
+      }
+    }
+    return undefined;
+  }
+
+  // 获取所有配置值
+  const host = getConfigValue('host');
+  const port = getConfigValue('port');
+  const user = getConfigValue('user');
+  const password = getConfigValue('password');
+  const database = getConfigValue('database');
+
+  // 检查是否有任何配置被设置
+  const hasAnyConfig = host || port || user || password || database;
 
   if (!hasAnyConfig) {
     throw new Error(
       `MySQL CRUD MCP 服务器需要配置数据库连接信息。\n\n` +
-      `请按照以下步骤配置：\n\n` +
-      `1. 复制项目中的 cline_mcp_settings.example.json 文件\n` +
-      `2. 编辑其中的数据库配置信息\n` +
-      `3. 将配置添加到您的 cline_mcp_settings.json 文件中\n\n` +
-      `配置位置: %APPDATA%\\Code\\User\\globalStorage\\saoudrizwan.claude-dev\\settings\\cline_mcp_settings.json\n\n` +
-      `必需的环境变量:\n` +
-      `- MYSQL_HOST: MySQL 服务器主机地址 (例如: 127.0.0.1)\n` +
-      `- MYSQL_PORT: MySQL 服务器端口 (例如: 3306)\n` +
-      `- MYSQL_USER: MySQL 用户名\n` +
-      `- MYSQL_PASSWORD: MySQL 密码\n` +
-      `- MYSQL_DATABASE: MySQL 数据库名\n\n` +
-      `或者运行 install.js 脚本进行自动配置。`
+      `配置方式（优先级顺序）：\n\n` +
+      `1. 项目级 .env 文件（推荐）\n` +
+      `   - 在项目根目录创建 .env 文件\n` +
+      `   - 支持的配置名称（任选其一）：\n` +
+      `     • 主机: MYSQL_HOST / DB_HOST / DATABASE_HOST / HOST\n` +
+      `     • 端口: MYSQL_PORT / DB_PORT / DATABASE_PORT / PORT\n` +
+      `     • 用户: MYSQL_USER / DB_USER / DATABASE_USER / USER / MYSQL_USERNAME / DB_USERNAME\n` +
+      `     • 密码: MYSQL_PASSWORD / DB_PASSWORD / DATABASE_PASSWORD / PASSWORD\n` +
+      `     • 数据库: MYSQL_DATABASE / DB_NAME / DATABASE_NAME / DATABASE / DB_DATABASE\n\n` +
+      `2. 全局 MCP 配置文件\n` +
+      `   - 复制项目中的 cline_mcp_settings.example.json 文件\n` +
+      `   - 编辑其中的数据库配置信息\n` +
+      `   - 将配置添加到您的 cline_mcp_settings.json 文件中\n` +
+      `   - 配置位置: %APPDATA%\\Code\\User\\globalStorage\\saoudrizwan.claude-dev\\settings\\cline_mcp_settings.json\n\n` +
+      `示例 .env 文件：\n` +
+      `DB_HOST=127.0.0.1\n` +
+      `DB_PORT=3306\n` +
+      `DB_USER=root\n` +
+      `DB_PASSWORD=your_password\n` +
+      `DB_NAME=your_database\n\n` +
+      `或者运行 install.cjs 脚本进行自动配置。`
     );
   }
 
-  // 检查所有必需的环境变量
-  for (const envVar of requiredEnvVars) {
-    if (!process.env[envVar]) {
+  // 检查所有必需的配置值
+  const requiredConfigs = {
+    host: 'MYSQL_HOST / DB_HOST / DATABASE_HOST / HOST',
+    port: 'MYSQL_PORT / DB_PORT / DATABASE_PORT / PORT',
+    user: 'MYSQL_USER / DB_USER / DATABASE_USER / USER',
+    password: 'MYSQL_PASSWORD / DB_PASSWORD / DATABASE_PASSWORD / PASSWORD',
+    database: 'MYSQL_DATABASE / DB_NAME / DATABASE_NAME / DATABASE'
+  };
+
+  for (const [key, names] of Object.entries(requiredConfigs)) {
+    const value = getConfigValue(key);
+    if (!value) {
       throw new Error(
-        `缺少必需的环境变量: ${envVar}\n\n` +
-        `请在 MCP 设置中配置以下环境变量:\n` +
-        `- MYSQL_HOST: MySQL 服务器主机地址\n` +
-        `- MYSQL_PORT: MySQL 服务器端口\n` +
-        `- MYSQL_USER: MySQL 用户名\n` +
-        `- MYSQL_PASSWORD: MySQL 密码\n` +
-        `- MYSQL_DATABASE: MySQL 数据库名\n\n` +
-        `配置示例:\n` +
-        `"env": {\n` +
-        `  "MYSQL_HOST": "127.0.0.1",\n` +
-        `  "MYSQL_PORT": "3306",\n` +
-        `  "MYSQL_USER": "your_username",\n` +
-        `  "MYSQL_PASSWORD": "your_password",\n` +
-        `  "MYSQL_DATABASE": "your_database"\n` +
-        `}`
+        `缺少必需的数据库配置: ${names}\n\n` +
+        `请通过以下方式之一配置：\n\n` +
+        `1. 在项目根目录的 .env 文件中配置（推荐）\n` +
+        `   示例：\n` +
+        `   DB_HOST=127.0.0.1\n` +
+        `   DB_PORT=3306\n` +
+        `   DB_USER=root\n` +
+        `   DB_PASSWORD=your_password\n` +
+        `   DB_NAME=your_database\n\n` +
+        `2. 在 MCP 设置中配置环境变量\n\n` +
+        `支持的配置名称：\n` +
+        `- 主机: MYSQL_HOST / DB_HOST / DATABASE_HOST / HOST\n` +
+        `- 端口: MYSQL_PORT / DB_PORT / DATABASE_PORT / PORT\n` +
+        `- 用户: MYSQL_USER / DB_USER / DATABASE_USER / USER / MYSQL_USERNAME / DB_USERNAME\n` +
+        `- 密码: MYSQL_PASSWORD / DB_PASSWORD / DATABASE_PASSWORD / PASSWORD\n` +
+        `- 数据库: MYSQL_DATABASE / DB_NAME / DATABASE_NAME / DATABASE / DB_DATABASE`
       );
     }
   }
 
   return {
-    host: process.env.MYSQL_HOST!,
-    port: parseInt(process.env.MYSQL_PORT!),
-    user: process.env.MYSQL_USER!,
-    password: process.env.MYSQL_PASSWORD!,
-    database: process.env.MYSQL_DATABASE!,
+    host: host!,
+    port: parseInt(port!),
+    user: user!,
+    password: password!,
+    database: database!,
     connectTimeout: 60000,
-    acquireTimeout: 60000,
-    timeout: 60000,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
   };
 }
 

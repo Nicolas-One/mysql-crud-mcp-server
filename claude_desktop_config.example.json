@@ -5,14 +5,7 @@
       "args": ["完整路径/mysql-crud-server/build/index.js"],
       "env": {
         "ENV_PATH": "/path/to/your/project/.env"
-      },
-      "disabled": false,
-      "autoApprove": [
-        "mysql_select",
-        "mysql_insert",
-        "mysql_update",
-        "mysql_delete"
-      ]
+      }
     }
   }
 }
