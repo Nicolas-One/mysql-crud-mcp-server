@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 
 /**
- * MySQL CRUD MCP 服务器
- * 提供用于 MySQL 数据库操作的工具：SELECT、INSERT、UPDATE、DELETE
+ * MySQL CRUD MCP 服务器 - 自动检测项目目录版
+ *
+ * 特性：
+ * 1. 自动向上查找 .env 文件定位项目根目录
+ * 2. 支持环境变量 PROJECT_DIR 手动指定
+ * 3. 兼容 Claude Code、Codex 等多种工具
+ * 4. 多项目连接池隔离
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -22,29 +27,70 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ==================== 项目目录检测 ====================
+
 /**
- * 解析 INI 格式的配置文件
+ * 向上查找 .env 文件所在目录
  */
+function findProjectRoot(startDir: string): string {
+  let dir = startDir;
+
+  // 最多向上查找 10 层
+  for (let i = 0; i < 10; i++) {
+    const envPath = path.join(dir, '.env');
+    if (fs.existsSync(envPath)) {
+      return dir;
+    }
+
+    const parentDir = path.dirname(dir);
+    if (parentDir === dir) {
+      // 已到达根目录
+      break;
+    }
+    dir = parentDir;
+  }
+
+  // 未找到 .env，返回起始目录
+  return startDir;
+}
+
+/**
+ * 获取项目目录
+ */
+function getProjectDir(): string {
+  // 优先级 1: 环境变量指定
+  if (process.env.PROJECT_DIR) {
+    return process.env.PROJECT_DIR;
+  }
+  if (process.env.MCP_PROJECT_DIR) {
+    return process.env.MCP_PROJECT_DIR;
+  }
+
+  // 优先级 2: 从当前工作目录向上查找 .env
+  const cwd = process.cwd();
+  const projectRoot = findProjectRoot(cwd);
+
+  return projectRoot;
+}
+
+// ==================== 连接池管理 ====================
+
+const poolCache: Map<string, mysql.Pool> = new Map();
+
 function parseIniConfig(filePath: string): Record<string, Record<string, string>> {
   const config: Record<string, Record<string, string>> = {};
 
   try {
-    if (!fs.existsSync(filePath)) {
-      return config;
-    }
+    if (!fs.existsSync(filePath)) return config;
 
-    const content = fs.readFileSync(filePath, 'utf-8');
+    // 统一换行符，支持 Windows (\r\n)、Unix (\n) 和旧 Mac (\r)
+    const content = fs.readFileSync(filePath, 'utf-8').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     let currentSection = '';
 
     content.split('\n').forEach(line => {
       line = line.trim();
+      if (!line || line.startsWith(';') || line.startsWith('#')) return;
 
-      // 跳过空行和注释
-      if (!line || line.startsWith(';') || line.startsWith('#')) {
-        return;
-      }
-
-      // 检查是否是 section 标题
       const sectionMatch = line.match(/^\[([^\]]+)\]$/);
       if (sectionMatch) {
         currentSection = sectionMatch[1];
@@ -52,468 +98,155 @@ function parseIniConfig(filePath: string): Record<string, Record<string, string>
         return;
       }
 
-      // 解析 key=value
       const keyValueMatch = line.match(/^([^=]+)=(.*)$/);
       if (keyValueMatch && currentSection) {
-        const key = keyValueMatch[1].trim();
-        const value = keyValueMatch[2].trim();
-        config[currentSection][key] = value;
+        config[currentSection][keyValueMatch[1].trim()] = keyValueMatch[2].trim();
       }
     });
-  } catch (error) {
-    // 忽略解析错误
-  }
+  } catch (error) {}
 
   return config;
 }
 
-// 数据库连接配置 - 支持项目级 .env 文件和环境变量
-// 支持两种格式：KEY=VALUE 格式 或 INI 格式
-function getDatabaseConfig() {
-  // 优先级 1: 尝试读取 .env 文件
-  // 优先级顺序：当前工作目录 > ENV_PATH环境变量 > 源代码相对路径
-  const envPath = process.env.ENV_PATH || path.join(process.cwd(), '.env');
-
-  // 首先尝试解析 INI 格式
+function getDatabaseConfig(projectDir: string) {
+  const envPath = path.join(projectDir, '.env');
   const iniConfig = parseIniConfig(envPath);
 
-  // 然后加载标准 .env 格式
-  dotenv.config({ path: envPath });
+  // 临时加载 .env
+  const dbEnvKeys = ['MYSQL_HOST', 'DB_HOST', 'DATABASE_HOST', 'HOST', 'HOSTNAME',
+    'MYSQL_PORT', 'DB_PORT', 'DATABASE_PORT', 'PORT', 'HOSTPORT',
+    'MYSQL_USER', 'DB_USER', 'MYSQL_USERNAME', 'DB_USERNAME', 'DATABASE_USER', 'USERNAME', 'USER',
+    'MYSQL_PASSWORD', 'DB_PASSWORD', 'DATABASE_PASSWORD', 'PASSWORD',
+    'MYSQL_DATABASE', 'DB_NAME', 'DATABASE_NAME', 'DATABASE', 'DB_DATABASE',
+    'CHARSET', 'CHARACTER_SET'];
 
-  // 定义可能的配置名称映射（支持多种命名约定）
-  const configNameMappings = {
-    host: ['MYSQL_HOST', 'DB_HOST', 'DATABASE_HOST', 'HOST', 'HOSTNAME'],
-    port: ['MYSQL_PORT', 'DB_PORT', 'DATABASE_PORT', 'PORT', 'HOSTPORT'],
+  const originalEnv: Record<string, string | undefined> = {};
+  dbEnvKeys.forEach(k => originalEnv[k] = process.env[k]);
+
+  if (fs.existsSync(envPath)) dotenv.config({ path: envPath });
+
+  const mappings: Record<string, string[]> = {
+    host: ['MYSQL_HOST', 'DB_HOST', 'DATABASE_HOST', 'HOSTNAME'],
+    port: ['MYSQL_PORT', 'DB_PORT', 'DATABASE_PORT', 'HOSTPORT'],
     user: ['MYSQL_USER', 'DB_USER', 'MYSQL_USERNAME', 'DB_USERNAME', 'DATABASE_USER', 'USERNAME', 'USER'],
     password: ['MYSQL_PASSWORD', 'DB_PASSWORD', 'DATABASE_PASSWORD', 'PASSWORD'],
     database: ['MYSQL_DATABASE', 'DB_NAME', 'DATABASE_NAME', 'DATABASE', 'DB_DATABASE'],
     charset: ['CHARSET', 'CHARACTER_SET']
   };
 
-  // 尝试从环境变量中获取配置值
-  function getConfigValue(configKey: string): string | undefined {
-    const possibleNames = configNameMappings[configKey as keyof typeof configNameMappings];
-    if (!possibleNames) return undefined;
-
-    for (const name of possibleNames) {
-      if (process.env[name]) {
-        return process.env[name];
-      }
+  const getEnvValue = (key: string): string | undefined => {
+    const names = mappings[key];
+    if (!names) return undefined;
+    for (const name of names) {
+      if (process.env[name]) return process.env[name];
     }
     return undefined;
-  }
+  };
 
-  // 尝试从 INI 配置中获取值
-  function getIniConfigValue(configKey: string): string | undefined {
-    // 支持 [DATABASE] 和 [MYSQL] 两种 section
-    const sections = ['DATABASE', 'MYSQL'];
-
-    for (const section of sections) {
-      if (iniConfig[section]) {
-        const possibleNames = configNameMappings[configKey as keyof typeof configNameMappings];
-        if (possibleNames) {
-          for (const name of possibleNames) {
-            if (iniConfig[section][name]) {
-              return iniConfig[section][name];
-            }
-          }
-        }
-      }
+  // INI 配置只从 DATABASE section 读取，避免与其他 section 混淆
+  const getIniValue = (key: string): string | undefined => {
+    const names = mappings[key];
+    if (!names || !iniConfig.DATABASE) return undefined;
+    for (const name of names) {
+      if (iniConfig.DATABASE[name]) return iniConfig.DATABASE[name];
     }
     return undefined;
-  }
-
-  // 获取所有配置值（优先级：环境变量 > INI 配置 > 默认值）
-  const host = getConfigValue('host') || getIniConfigValue('host');
-  const port = getConfigValue('port') || getIniConfigValue('port');
-  const user = getConfigValue('user') || getIniConfigValue('user');
-  const password = getConfigValue('password') || getIniConfigValue('password');
-  const database = getConfigValue('database') || getIniConfigValue('database');
-  const charset = getConfigValue('charset') || getIniConfigValue('charset') || 'utf8';
-
-  // 检查是否有任何配置被设置
-  const hasAnyConfig = host || port || user || password || database;
-
-  if (!hasAnyConfig) {
-    throw new Error(
-      `MySQL CRUD MCP 服务器需要配置数据库连接信息。\n\n` +
-      `配置方式（优先级顺序）：\n\n` +
-      `1. 项目级 .env 文件（推荐）\n` +
-      `   - 在项目根目录创建 .env 文件\n` +
-      `   - 支持两种格式：\n\n` +
-      `   格式一：标准 KEY=VALUE 格式\n` +
-      `   DB_HOST=127.0.0.1\n` +
-      `   DB_PORT=3306\n` +
-      `   DB_USER=root\n` +
-      `   DB_PASSWORD=your_password\n` +
-      `   DB_NAME=your_database\n` +
-      `   CHARSET=utf8\n\n` +
-      `   格式二：INI 格式（[DATABASE] 或 [MYSQL] section）\n` +
-      `   [DATABASE]\n` +
-      `   TYPE=mysql\n` +
-      `   HOSTNAME=127.0.0.1\n` +
-      `   HOSTPORT=3306\n` +
-      `   USERNAME=root\n` +
-      `   PASSWORD=your_password\n` +
-      `   DATABASE=your_database\n` +
-      `   CHARSET=utf8\n\n` +
-      `   支持的配置名称（任选其一）：\n` +
-      `     • 主机: MYSQL_HOST / DB_HOST / DATABASE_HOST / HOST / HOSTNAME\n` +
-      `     • 端口: MYSQL_PORT / DB_PORT / DATABASE_PORT / PORT / HOSTPORT\n` +
-      `     • 用户: MYSQL_USER / DB_USER / DATABASE_USER / USER / MYSQL_USERNAME / DB_USERNAME / USERNAME\n` +
-      `     • 密码: MYSQL_PASSWORD / DB_PASSWORD / DATABASE_PASSWORD / PASSWORD\n` +
-      `     • 数据库: MYSQL_DATABASE / DB_NAME / DATABASE_NAME / DATABASE / DB_DATABASE\n` +
-      `     • 字符集: CHARSET / CHARACTER_SET (默认: utf8)\n\n` +
-      `2. 全局 MCP 配置文件\n` +
-      `   - 复制项目中的 cline_mcp_settings.example.json 文件\n` +
-      `   - 编辑其中的数据库配置信息\n` +
-      `   - 将配置添加到您的 cline_mcp_settings.json 文件中\n` +
-      `   - 配置位置: %APPDATA%\\Code\\User\\globalStorage\\saoudrizwan.claude-dev\\settings\\cline_mcp_settings.json\n\n` +
-      `或者运行 install.cjs 脚本进行自动配置。`
-    );
-  }
-
-  // 检查所有必需的配置值
-  const requiredConfigs = {
-    host: 'MYSQL_HOST / DB_HOST / DATABASE_HOST / HOST',
-    port: 'MYSQL_PORT / DB_PORT / DATABASE_PORT / PORT',
-    user: 'MYSQL_USER / DB_USER / DATABASE_USER / USER',
-    password: 'MYSQL_PASSWORD / DB_PASSWORD / DATABASE_PASSWORD / PASSWORD',
-    database: 'MYSQL_DATABASE / DB_NAME / DATABASE_NAME / DATABASE'
   };
 
-  for (const [key, names] of Object.entries(requiredConfigs)) {
-    const value = getConfigValue(key) || getIniConfigValue(key);
-    if (!value) {
-      throw new Error(
-        `缺少必需的数据库配置: ${names}\n\n` +
-        `请通过以下方式之一配置：\n\n` +
-        `1. 在项目根目录的 .env 文件中配置（推荐）\n` +
-        `   格式一：标准 KEY=VALUE 格式\n` +
-        `   DB_HOST=127.0.0.1\n` +
-        `   DB_PORT=3306\n` +
-        `   DB_USER=root\n` +
-        `   DB_PASSWORD=your_password\n` +
-        `   DB_NAME=your_database\n\n` +
-        `   格式二：INI 格式\n` +
-        `   [DATABASE]\n` +
-        `   HOSTNAME=127.0.0.1\n` +
-        `   HOSTPORT=3306\n` +
-        `   USERNAME=root\n` +
-        `   PASSWORD=your_password\n` +
-        `   DATABASE=your_database\n\n` +
-        `2. 在 MCP 设置中配置环境变量\n\n` +
-        `支持的配置名称：\n` +
-        `- 主机: MYSQL_HOST / DB_HOST / DATABASE_HOST / HOST / HOSTNAME\n` +
-        `- 端口: MYSQL_PORT / DB_PORT / DATABASE_PORT / PORT / HOSTPORT\n` +
-        `- 用户: MYSQL_USER / DB_USER / DATABASE_USER / USER / MYSQL_USERNAME / DB_USERNAME / USERNAME\n` +
-        `- 密码: MYSQL_PASSWORD / DB_PASSWORD / DATABASE_PASSWORD / PASSWORD\n` +
-        `- 数据库: MYSQL_DATABASE / DB_NAME / DATABASE_NAME / DATABASE / DB_DATABASE\n` +
-        `- 字符集: CHARSET / CHARACTER_SET (默认: utf8)`
-      );
-    }
+  const host = getEnvValue('host') || getIniValue('host');
+  const port = getEnvValue('port') || getIniValue('port');
+  const user = getEnvValue('user') || getIniValue('user');
+  const password = getEnvValue('password') || getIniValue('password');
+  const database = getEnvValue('database') || getIniValue('database');
+  const charset = getEnvValue('charset') || getIniValue('charset') || 'utf8';
+
+  // 恢复环境变量
+  dbEnvKeys.forEach(k => originalEnv[k] === undefined ? delete process.env[k] : process.env[k] = originalEnv[k]);
+
+  if (!host || !port || !user || !password || !database) {
+    throw new Error(`MySQL 配置不完整。项目目录: ${projectDir}\n请检查 .env 文件中的数据库配置。`);
   }
 
-  return {
-    host: host!,
-    port: parseInt(port!),
-    user: user!,
-    password: password!,
-    database: database!,
-    charset: charset,
-    connectTimeout: 60000,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-  };
+  const OPERATION_TIMEOUT = parseInt(process.env.MYSQL_TIMEOUT || '10000'); // 默认 10 秒
+
+  return { host, port: parseInt(port), user, password, database, charset, connectTimeout: OPERATION_TIMEOUT, acquireTimeout: OPERATION_TIMEOUT, waitForConnections: true, connectionLimit: 10, queueLimit: 0 };
 }
 
-/**
- * 创建 MySQL 连接池
- */
-let pool: mysql.Pool;
+async function getPool(projectDir: string): Promise<mysql.Pool> {
+  if (poolCache.has(projectDir)) return poolCache.get(projectDir)!;
 
-/**
- * 初始化数据库连接池
- */
-async function initializeDatabase() {
-  try {
-    const dbConfig = getDatabaseConfig();
-    pool = mysql.createPool(dbConfig);
-    // 测试连接
-    const connection = await pool.getConnection();
-    await connection.ping();
-    connection.release();
-    console.error('MySQL 连接池初始化成功');
-  } catch (error) {
-    console.error('初始化 MySQL 连接失败:', error);
-    throw error;
-  }
+  const config = getDatabaseConfig(projectDir);
+  const pool = mysql.createPool(config);
+
+  // 懒加载：不在此处测试连接，让首次查询时自动建立连接
+  console.error(`MySQL 连接池已创建 [${projectDir}] -> ${config.host}:${config.port}/${config.database}`);
+  poolCache.set(projectDir, pool);
+  return pool;
 }
 
-/**
- * 验证 SQL 查询参数
- */
-function validateQueryArgs(args: any): args is { query: string; params?: any[] } {
-  return (
-    typeof args === 'object' &&
-    args !== null &&
-    typeof args.query === 'string' &&
-    (args.params === undefined || Array.isArray(args.params))
-  );
-}
+// ==================== MCP 服务器 ====================
 
-/**
- * 执行 SELECT 查询
- */
-async function executeSelect(query: string, params?: any[]): Promise<any[]> {
-  const connection = await pool.getConnection();
-  try {
-    const [rows] = await connection.execute(query, params);
-    return rows as any[];
-  } finally {
-    connection.release();
-  }
-}
-
-/**
- * 执行 INSERT 查询
- */
-async function executeInsert(query: string, params?: any[]): Promise<any> {
-  const connection = await pool.getConnection();
-  try {
-    const [result] = await connection.execute(query, params);
-    return result;
-  } finally {
-    connection.release();
-  }
-}
-
-/**
- * 执行 UPDATE 查询
- */
-async function executeUpdate(query: string, params?: any[]): Promise<any> {
-  const connection = await pool.getConnection();
-  try {
-    const [result] = await connection.execute(query, params);
-    return result;
-  } finally {
-    connection.release();
-  }
-}
-
-/**
- * 执行 DELETE 查询
- */
-async function executeDelete(query: string, params?: any[]): Promise<any> {
-  const connection = await pool.getConnection();
-  try {
-    const [result] = await connection.execute(query, params);
-    return result;
-  } finally {
-    connection.release();
-  }
-}
-
-/**
- * 创建带有 MySQL CRUD 操作工具的 MCP 服务器
- */
 const server = new Server(
-  {
-    name: "mysql-crud-server",
-    version: "0.1.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
+  { name: "mysql-crud-server", version: "1.3.0" },
+  { capabilities: { tools: {} } }
 );
 
-/**
- * 列出可用 MySQL CRUD 工具的处理器
- */
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "mysql_select",
-        description: "在 MySQL 数据库上执行 SELECT 查询",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: {
-              type: "string",
-              description: "要执行的 SELECT SQL 查询"
-            },
-            params: {
-              type: "array",
-              items: { type: ["string", "number", "boolean"] },
-              description: "查询的可选参数（用于预处理语句）"
-            }
-          },
-          required: ["query"]
-        }
-      },
-      {
-        name: "mysql_insert",
-        description: "在 MySQL 数据库上执行 INSERT 查询",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: {
-              type: "string",
-              description: "要执行的 INSERT SQL 查询"
-            },
-            params: {
-              type: "array",
-              items: { type: ["string", "number", "boolean"] },
-              description: "查询的可选参数（用于预处理语句）"
-            }
-          },
-          required: ["query"]
-        }
-      },
-      {
-        name: "mysql_update",
-        description: "在 MySQL 数据库上执行 UPDATE 查询",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: {
-              type: "string",
-              description: "要执行的 UPDATE SQL 查询"
-            },
-            params: {
-              type: "array",
-              items: { type: ["string", "number", "boolean"] },
-              description: "查询的可选参数（用于预处理语句）"
-            }
-          },
-          required: ["query"]
-        }
-      },
-      {
-        name: "mysql_delete",
-        description: "在 MySQL 数据库上执行 DELETE 查询",
-        inputSchema: {
-          type: "object",
-          properties: {
-            query: {
-              type: "string",
-              description: "要执行的 DELETE SQL 查询"
-            },
-            params: {
-              type: "array",
-              items: { type: ["string", "number", "boolean"] },
-              description: "查询的可选参数（用于预处理语句）"
-            }
-          },
-          required: ["query"]
-        }
-      }
-    ]
-  };
-});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    { name: "mysql_select", description: "执行 SELECT 查询。自动读取项目 .env 配置连接数据库。", inputSchema: { type: "object", properties: { query: { type: "string", description: "SQL 查询" }, params: { type: "array", items: { type: ["string", "number", "boolean"] } } }, required: ["query"] } },
+    { name: "mysql_insert", description: "执行 INSERT 查询。", inputSchema: { type: "object", properties: { query: { type: "string" }, params: { type: "array", items: { type: ["string", "number", "boolean"] } } }, required: ["query"] } },
+    { name: "mysql_update", description: "执行 UPDATE 查询。", inputSchema: { type: "object", properties: { query: { type: "string" }, params: { type: "array", items: { type: ["string", "number", "boolean"] } } }, required: ["query"] } },
+    { name: "mysql_delete", description: "执行 DELETE 查询。", inputSchema: { type: "object", properties: { query: { type: "string" }, params: { type: "array", items: { type: ["string", "number", "boolean"] } } }, required: ["query"] } },
+    { name: "mysql_info", description: "获取连接信息。", inputSchema: { type: "object", properties: {} } }
+  ]
+}));
 
-/**
- * MySQL CRUD 工具调用的处理器
- */
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (!validateQueryArgs(request.params.arguments)) {
-    throw new McpError(
-      ErrorCode.InvalidParams,
-      '无效的查询参数。必需参数：query (字符串)，可选参数：params (数组)'
-    );
-  }
-
-  const { query, params } = request.params.arguments;
-
   try {
-    let result: any;
+    const projectDir = getProjectDir();
+    const pool = await getPool(projectDir);
 
-    switch (request.params.name) {
-      case "mysql_select":
-        result = await executeSelect(query, params);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `SELECT 执行成功。返回行数: ${result.length}\n\n${JSON.stringify(result, null, 2)}`
-            }
-          ]
-        };
+    if (request.params.name === "mysql_info") {
+      return { content: [{ type: "text", text: `MySQL MCP 信息\n项目目录: ${projectDir}\n连接池数量: ${poolCache.size}` }] };
+    }
 
-      case "mysql_insert":
-        result = await executeInsert(query, params);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `INSERT 执行成功。影响行数: ${result.affectedRows}, 插入ID: ${result.insertId}`
-            }
-          ]
-        };
+    const args = request.params.arguments as any;
+    if (!args?.query) throw new McpError(ErrorCode.InvalidParams, '缺少 query 参数');
 
-      case "mysql_update":
-        result = await executeUpdate(query, params);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `UPDATE 执行成功。影响行数: ${result.affectedRows}, 更改行数: ${result.changedRows}`
-            }
-          ]
-        };
+    const conn = await pool.getConnection();
+    try {
+      const [result] = await conn.execute(args.query, args.params);
 
-      case "mysql_delete":
-        result = await executeDelete(query, params);
-        return {
-          content: [
-            {
-              type: "text",
-              text: `DELETE 执行成功。影响行数: ${result.affectedRows}`
-            }
-          ]
-        };
+      const messages: Record<string, string> = {
+        mysql_select: `SELECT 成功。返回 ${Array.isArray(result) ? result.length : 0} 行\n\n${JSON.stringify(result, null, 2)}`,
+        mysql_insert: `INSERT 成功。影响 ${(result as any).affectedRows} 行，ID: ${(result as any).insertId}`,
+        mysql_update: `UPDATE 成功。影响 ${(result as any).affectedRows} 行`,
+        mysql_delete: `DELETE 成功。影响 ${(result as any).affectedRows} 行`
+      };
 
-      default:
-        throw new McpError(
-          ErrorCode.MethodNotFound,
-          `未知工具: ${request.params.name}`
-        );
+      return { content: [{ type: "text", text: messages[request.params.name] || '执行成功' }] };
+    } finally {
+      conn.release();
     }
   } catch (error) {
-    console.error(`MySQL 操作失败:`, error);
-    return {
-      content: [
-        {
-          type: "text",
-          text: `MySQL 操作失败: ${error instanceof Error ? error.message : String(error)}`
-        }
-      ],
-      isError: true
-    };
+    // 连接错误时清除缓存，下次请求重新创建连接池
+    const projectDir = getProjectDir();
+    if (poolCache.has(projectDir)) {
+      const pool = poolCache.get(projectDir)!;
+      poolCache.delete(projectDir);
+      pool.end().catch(() => {});
+    }
+    return { content: [{ type: "text", text: `操作失败: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
   }
 });
 
-/**
- * 使用 stdio 传输启动服务器
- */
 async function main() {
-  try {
-    await initializeDatabase();
+  const projectDir = getProjectDir();
+  console.error(`MySQL CRUD MCP 启动`);
+  console.error(`项目目录: ${projectDir}`);
 
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
-    console.error('MySQL CRUD MCP 服务器正在 stdio 上运行');
-  } catch (error) {
-    console.error('启动服务器失败:', error);
-    process.exit(1);
-  }
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
 }
 
-main().catch((error) => {
-  console.error("服务器错误:", error);
-  process.exit(1);
-});
+main().catch(console.error);

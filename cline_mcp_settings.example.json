@@ -4,7 +4,12 @@
       "command": "node",
       "args": ["完整路径/mysql-crud-server/build/index.js"],
       "env": {
-        "ENV_PATH": "/path/to/your/project/.env"
+        "ENV_PATH": "/path/to/your/project/.env",
+        "DB_HOST": "8.137.163.42",
+        "DB_PORT": "3306",
+        "DB_USER": "meedu",
+        "DB_PASSWORD": "XVLBDO9aUN78gdpSbHTQMAPR",
+        "DB_NAME": "meedu"
       },
       "disabled": false,
       "autoApprove": [

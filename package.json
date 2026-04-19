@@ -1,9 +1,11 @@
 {
   "name": "mysql-crud-server",
-  "version": "1.0.1",
-  "description": "MySQL CRUD MCP 服务器 - 提供完整的 MySQL 数据库操作工具",
+  "version": "1.1.0",
+  "description": "MySQL CRUD MCP 服务器 - 自动检测项目配置，支持多项目切换",
   "main": "build/index.js",
-  "bin": "build/index.js",
+  "bin": {
+    "mysql-crud-server": "build/index.js"
+  },
   "type": "module",
   "files": [
     "build",
@@ -19,7 +21,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/mysql-crud-server"
+    "url": ""
   },
   "keywords": [
     "mysql",
@@ -28,9 +30,10 @@
     "database",
     "cline",
     "claude-code",
+    "codex",
     "model-context-protocol"
   ],
-  "author": "Your Name <your-email@example.com>",
+  "author": "",
   "license": "MIT",
   "engines": {
     "node": ">=16.0.0"
